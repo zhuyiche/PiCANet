@@ -1,98 +1,178 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-#import torchvision
+import torchvision
 import time
 
 
+class Encoder(nn.Module):
+    def __init__(self, inchannel, outchannel):
+        super(Encoder, self).__init__()
+        self.conv1 = nn.Conv2d(inchannel, 64, 7, padding=3, stride=2)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.pooling1 = nn.MaxPool2d(stride=2, kernel_size=3)
+        class _BasicShortcut(nn.Module):
+            def __init__(self, inchannel, outchannel, stride=None):
+                super(_BasicShortcut, self).__init__()
+                if stride == False:
+                    self.conv = nn.Conv2d(inchannel, outchannel, kernel_size=1,
+                                          stride=1, padding=0, bias=False)
+                else:
+                    self.conv = nn.Conv2d(inchannel, outchannel, kernel_size=1,
+                                          stride=2, padding=0, bias=False)
+                self.bn = nn.BatchNorm2d(outchannel)
 
-class Renet(nn.Module):
-    def __init__(self, patch_size, inplane, outplane):
-        super(Renet, self).__init__()
-        self.patch_size = patch_size
-        self.inplane = inplane
-        self.outplane = outplane
-        self.horizontal_LSTM = nn.LSTM(input_size=inplane,
-                                       hidden_size=inplane,
-                                       batch_first=True,
-                                       bidirectional=True)
-        self.vertical_LSTM = nn.LSTM(input_size=2*inplane,
-                                     hidden_size=inplane,
-                                     batch_first=True,
-                                     bidirectional=True)
-        self.conv = nn.Conv2d(2*inplane, outplane, 1)
+            def forward(self, *input):
+                x = input[0]
+                x = self.conv(x)
+                out = self.bn(x)
+                return out
+
+        class _ElongShortcut(nn.Module):
+            def __init__(self, inchannel, medchannel, outchannel, stage, stride=None, dilation=None):
+                super(_ElongShortcut, self).__init__()
+                if stage == 2 or stage == 3:
+                    if stride == False:
+                        self.conv1 = nn.Conv2d(inchannel, medchannel, kernel_size=1,
+                                               padding=0, stride=1, bias=False)
+                    else:
+                        self.conv1 = nn.Conv2d(inchannel, medchannel, kernel_size=2,
+                                               padding=0, stride=1, bias=False)
+                    self.shortcut = nn.Sequential(
+                        nn.BatchNorm2d(medchannel),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(medchannel, medchannel, kernel_size=3, padding=1, stride=1, bias=False),
+                        nn.BatchNorm2d(medchannel),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(medchannel, outchannel, kernel_size=1, padding=0, stride=1),
+                        nn.BatchNorm2d(outchannel)
+                    )
+                elif stage == 4:
+                    self.conv1 = nn.Conv2d(inchannel, medchannel, kernel_size=1,
+                                           padding=0, stride=1, bias=False)
+                    self.shortcut = nn.Sequential(
+                        nn.BatchNorm2d(medchannel),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(medchannel, medchannel, kernel_size=3, padding=2,
+                                  stride=1, dilation=dilation, bias=False),
+                        nn.BatchNorm2d(medchannel),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(medchannel, outchannel, kernel_size=1,
+                                  padding=0, stride=1, bias=False),
+                        nn.BatchNorm2d(outchannel)
+                    )
+                elif stage == 5:
+                    self.conv1 = nn.Conv2d(inchannel, medchannel, kernel_size=1,
+                                           padding=0, stride=1, bias=False)
+                    self.shortcut = nn.Sequential(
+                        nn.BatchNorm2d(medchannel),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(medchannel, medchannel, kernel_size=3, padding=4,
+                                  stride=1, dilation=dilation, bias=False),
+                        nn.BatchNorm2d(medchannel),
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(medchannel, outchannel, kernel_size=1,
+                                  padding=0, stride=1, bias=False),
+                        nn.BatchNorm2d(outchannel)
+                    )
+
+
+            def forward(self, *input):
+                x = input[0]
+                x = self.conv1(x)
+                out = self.shortcut(x)
+                return out
+        # Stage 2
+        self.shortcut_2a_1 = _BasicShortcut(64, 256, stride=False)
+        self.shortcut_2a_2 = _ElongShortcut(64, 64, 256, stage=2)
+        self.shortcut_2bc = _ElongShortcut(256, 64, 256, stage=2)
+        # Stage 3
+        self.shortcut_3a_1 = _BasicShortcut(256, 512, stride=True)
+        self.shortcut_3a_2 = _ElongShortcut(256, 128, 512, stride=True, stage=3)
+        self.shortcut_3bcd = _ElongShortcut(512, 128, 512, stage=3)
+        # Stage 4
+        self.shortcut_4a_1 = _BasicShortcut(512, 1024, stride=False)
+        self.shortcut_4a_2 = _ElongShortcut(512, 256, 1024, stride=False, stage=4)
+        self.shortcut_4bcdef = _ElongShortcut(1024, 256, 1024, stride=False, dilation=2, stage=4)
+        # Stage 5
+        self.shortcut_5a_1 = _BasicShortcut(1024, 2048, stride=False)
+        self.shortcut_5a_2 = _ElongShortcut(1024, 512, 2048, stride=False, dilation=4, stage=5)
+        self.shortcut_5bc = _ElongShortcut(2048, 512, 2048, stride=False, dilation=4, stage=5)
 
     def forward(self, *input):
-        # input is (batch, channel, width, height)
-
-        # Here we follow PiCANet which we first flip horizontally twice,
-        # Then vertically twice,
         x = input[0]
-        vertical_fwd_concat = []
-        vertical_inv_concat = []
-        horizon_fwd_concat = []
-        horizon_inv_concat = []
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.pooling1(x)
+        # Stage 2
+        x_branch2a_1 = self.shortcut_2a_1(x)
+        x_branch2a_2 = self.shortcut_2a_2(x)
+        x_branch2a = torch.cat((x_branch2a_1, x_branch2a_2), dim=0)
+        x_branch2a = self.relu(x_branch2a)
 
-        width, height = x[2], x[3]
-        width_per_patch = width / self.patch_size
-        height_per_patch = height / self.patch_size
-        assert width_per_patch.is_interger()
-        assert height_per_patch.is_interger()
-        #######
-        # use LSTM horizontally forward and backward
-        for i in range(self.patch_size):
-            horizon_fwd, _ = self.horizontal_LSTM(x[:, :, i: (i+1) * width_per_patch, :])
-            horizon_fwd_concat.append(horizon_fwd)
-        x_horizon_fwd = torch.stack(horizon_fwd_concat, dim=2)
+        x_branch2b = self.shortcut_2bc(x)
+        x_branch2b = torch.cat((x_branch2b, x_branch2a), dim=0)
+        x_branch2b = self.relu(x_branch2b)
 
-        for i in reversed(self.patch_size):
-            horizon_inv, _ = self.horizontal_LSTM(x[:, :, i: (i+1) * width_per_patch, :])
-            horizon_inv_concat.append(horizon_inv)
-        x_horizon_inv = torch.stack(horizon_inv_concat, dim=2)
+        x_branch2c = self.shortcut_2bc(x)
+        x_branch2c = torch.cat((x_branch2c, x_branch2b), dim=0)
+        x_branch2c = self.relu(x_branch2c)
+        # Stage 3
+        x_branch3a_1 = self.shortcut_3a_1(x_branch2c)
+        x_branch3a_2 = self.shortcut_3a_2(x_branch2c)
+        x_branch3a = torch.cat((x_branch3a_1, x_branch3a_2), dim=0)
 
-        x = torch.concat(x_horizon_fwd, x_horizon_inv)
-        #######
-        # use LSTM vertically upward and downward
-        for j in range(self.patch_size):
-            vertical_fwd, _ = self.vertical_LSTM(x[:, :, :, j: (j+1) * height_per_patch])
-            vertical_fwd_concat.append(vertical_fwd)
-        x_vertical_fwd = torch.stack(vertical_fwd_concat, dim=3)
+        x_branch3b = self.shortcut_3bcd(x_branch3a)
+        x_branch3b = torch.cat((x_branch3a, x_branch3b), dim=0)
+        x_branch3b = self.relu(x_branch3b)
 
-        for j in reversed(range(self.patch_size)):
-            vertical_inv, _ = self.vertical_LSTM(x[:, :, :, j: (j+1) * height_per_patch])
-            vertical_inv_concat.append(vertical_inv)
-        x_vertical_inv = torch.stack(vertical_inv_concat, dim=3)
-        x = torch.concat(x_vertical_fwd, x_vertical_inv)
+        x_branch3c = self.shortcut_3bcd(x_branch3b)
+        x_branch3c = torch.cat((x_branch3c, x_branch3b), dim=0)
+        x_branch3c = self.relu(x_branch3c)
 
-        out = self.conv(x)
-        return out
+        x_branch3d = self.shortcut_3bcd(x_branch3c)
+        x_branch3d = torch.cat((x_branch3d, x_branch3c), dim=0)
+        x_branch3d = self.relu(x_branch3d)
+        # Stage 4
+        x_branch4a_1 = self.shortcut_4a_1(x_branch3d)
+        x_branch4a_2 = self.shortcut_4a_2(x_branch3d)
+        x_branch4a = torch.cat((x_branch4a_1, x_branch4a_2), dim=0)
+        x_branch4a = self.relu(x_branch4a)
+
+        x_branch4b = self.shortcut_4bcdef(x_branch4a)
+        x_branch4b = torch.cat((x_branch4b, x_branch4a), dim=0)
+        x_branch4b = self.relu(x_branch4b)
+
+        x_branch4c = self.shortcut_4bcdef(x_branch4b)
+        x_branch4c = torch.cat((x_branch4c, x_branch4b), dim=0)
+        x_branch4c = self.relu(x_branch4c)
+
+        x_branch4d = self.shortcut_4bcdef(x_branch4c)
+        x_branch4d = torch.cat((x_branch4d, x_branch4c), dim=0)
+        x_branch4d = self.relu(x_branch4d)
+
+        x_branch4e = self.shortcut_4bcdef(x_branch4d)
+        x_branch4e = torch.cat((x_branch4e, x_branch4d), dim=0)
+        x_branch4e = self.relu(x_branch4e)
+        # Stage 5
+        x_branch5a_1 = self.shortcut_5a_1(x_branch4e)
+        x_branch5a_2 = self.shortcut_5a_2(x_branch4e)
+        x_branch5a = torch.cat((x_branch5a_1, x_branch5a_2), dim=0)
+        x_branch5a = self.relu(x_branch5a)
+
+        x_branch5b = self.shortcut_5bc(x_branch5a)
+        x_branch5b = torch.cat((x_branch5b, x_branch5a), dim=0)
+        x_branch5b = self.relu(x_branch5b)
+
+        x_branch5c = self.shortcut_5bc(x_branch5b)
+        x_branch5c = torch.cat((x_branch5b, x_branch5c), dim=0)
+        x_branch5c = self.relu(x_branch5c)
+
+        return x_branch2c, x_branch3d, x_branch4e, x_branch5c
 
 
-class Attention_Golbal(nn.Module):
-    def __init__(self, patch_size, inplane, outplane, dilation=(1, 3, 3)):
-        super(Attention_Golbal, self).__init__()
-        # outplane should be height * width
-        self.renet = Renet(patch_size, inplane, outplane)
-        self.softmax = F.softmax(input, dim=1)
-        self.in_channel = inplane
-        self.dilation = dilation
 
-    def forward(self, *input):
-        x = input[0]
-        x_size = x.size()
-        x_renet = self.renet(x)
-        x_renet = self.softmax(x_renet)
-        x_renet = x_renet.reshape(x_size[0], )
-        x_renet = x.unsqueeze(0)
-        x = F.conv3d(input=x, weight=x_renet, bias=None, stride=1, padding=0,
-                     dilation=self.dilation, group=x_size[0])
 
-        return x
 
-if __name__ == '__main__':
-    from torch import IntTensor
-    from torch.autograd import Variable
-
-    a = [1, 2, 3, 4]
-    for i in reversed(range(20)):
-        print(i)
