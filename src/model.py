@@ -3,15 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 import time
-
+from module import Renet, AttentionGlobal, AttentionLocal
 
 class Encoder(nn.Module):
-    def __init__(self, inchannel, outchannel):
+    def __init__(self, inchannel=None, outchannel=None):
         super(Encoder, self).__init__()
         self.conv1 = nn.Conv2d(inchannel, 64, 7, padding=3, stride=2)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         self.pooling1 = nn.MaxPool2d(stride=2, kernel_size=3)
+        self.inchannel = inchannel
+
         class _BasicShortcut(nn.Module):
             def __init__(self, inchannel, outchannel, stride=None):
                 super(_BasicShortcut, self).__init__()
@@ -77,28 +79,33 @@ class Encoder(nn.Module):
                         nn.BatchNorm2d(outchannel)
                     )
 
-
             def forward(self, *input):
                 x = input[0]
                 x = self.conv1(x)
                 out = self.shortcut(x)
                 return out
+        # Default inchannel is 64, outchannel is 2048.
         # Stage 2
-        self.shortcut_2a_1 = _BasicShortcut(64, 256, stride=False)
-        self.shortcut_2a_2 = _ElongShortcut(64, 64, 256, stage=2)
-        self.shortcut_2bc = _ElongShortcut(256, 64, 256, stage=2)
+        self.shortcut_2a_1 = _BasicShortcut(inchannel, inchannel*4, stride=False)
+        self.shortcut_2a_2 = _ElongShortcut(inchannel, inchannel, inchannel*4, stage=2)
+        self.shortcut_2bc = _ElongShortcut(inchannel*4, inchannel, inchannel*4, stage=2)
         # Stage 3
-        self.shortcut_3a_1 = _BasicShortcut(256, 512, stride=True)
-        self.shortcut_3a_2 = _ElongShortcut(256, 128, 512, stride=True, stage=3)
-        self.shortcut_3bcd = _ElongShortcut(512, 128, 512, stage=3)
+        self.shortcut_3a_1 = _BasicShortcut(inchannel*4, inchannel*8, stride=True)
+        self.shortcut_3a_2 = _ElongShortcut(inchannel*4, inchannel*2, inchannel*8,
+                                            stride=True, stage=3)
+        self.shortcut_3bcd = _ElongShortcut(inchannel*8, inchannel*2, inchannel*8, stage=3)
         # Stage 4
-        self.shortcut_4a_1 = _BasicShortcut(512, 1024, stride=False)
-        self.shortcut_4a_2 = _ElongShortcut(512, 256, 1024, stride=False, stage=4)
-        self.shortcut_4bcdef = _ElongShortcut(1024, 256, 1024, stride=False, dilation=2, stage=4)
+        self.shortcut_4a_1 = _BasicShortcut(inchannel*8, inchannel*16, stride=False)
+        self.shortcut_4a_2 = _ElongShortcut(inchannel*8, inchannel*4, inchannel*16,
+                                            stride=False, stage=4)
+        self.shortcut_4bcdef = _ElongShortcut(inchannel*16, inchannel*4, inchannel*16,
+                                              stride=False, dilation=2, stage=4)
         # Stage 5
-        self.shortcut_5a_1 = _BasicShortcut(1024, 2048, stride=False)
-        self.shortcut_5a_2 = _ElongShortcut(1024, 512, 2048, stride=False, dilation=4, stage=5)
-        self.shortcut_5bc = _ElongShortcut(2048, 512, 2048, stride=False, dilation=4, stage=5)
+        self.shortcut_5a_1 = _BasicShortcut(inchannel*16, inchannel*32, stride=False)
+        self.shortcut_5a_2 = _ElongShortcut(inchannel*16, inchannel*8, inchannel*32,
+                                            stride=False, dilation=4, stage=5)
+        self.shortcut_5bc = _ElongShortcut(inchannel*32, inchannel*8, inchannel*32,
+                                           stride=False, dilation=4, stage=5)
 
     def forward(self, *input):
         x = input[0]
@@ -173,6 +180,57 @@ class Encoder(nn.Module):
         return x_branch2c, x_branch3d, x_branch4e, x_branch5c
 
 
+class Decoder(nn.Module):
+    def __init__(self, inchannel, outchannel):
+        super(Decoder, self).__init__()
+        self.conv1 = nn.Conv2d(inchannel, 64, 7, padding=3, stride=2)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.pooling1 = nn.MaxPool2d(stride=2, kernel_size=3)
 
+        self.encode = Encoder(inchannel=64)
+        self.attention5 = AttentionGlobal(patch_size=1, inplane=2048,
+                                         renet_outplane=100, renetconv_channel=256)
+        self.attention5 = AttentionGlobal(patch_size=1, inplane=1024,
+                                          renet_outplane=100, renetconv_channel=256)
+        self.conv5 = nn.Conv2d(inchannel, 1024, 1)
+        self.conv4_b4 = nn.Conv2d(1024, 2014, 1)
+        self.conv4_1 = nn.Conv2d(1024, 512, 1)
+        self.conv3_b4 = nn.Conv2d(512, 512, 1)
+        self.pool3_att_1 = nn.Conv2d(512, 128, kernel_size=7, padding=6, dilation=2)
+        self.pool3_att_2 = nn.Conv2d(128, 49, 1)
+        self.bn5 = nn.BatchNorm2d(1024)
+        self.bn4 = nn.BatchNorm2d(512)
+        self.bn3 = nn.BatchNorm2d(49)
 
+    def forward(self, *input):
+        x = input[0]
+        encode_branch2, encode_branch3, encode_branch4, encode_branch5 = self.encode(x)
+        att5 = self.attention5(encode_branch5)
+        decode_branch5 = torch.cat((encode_branch5, att5), dim=0)
+        decode_branch5 = self.conv5(decode_branch5)
+        decode_branch5 = self.bn5(decode_branch5)
+        decode_branch5 = self.relu(decode_branch5)
 
+        # Concat then do one conv
+        decode_branch4 = torch.cat((encode_branch4, decode_branch5), dim=0)
+        decode_branch4 = self.conv4(decode_branch4)
+        decode_branch4 = self.relu(decode_branch4)
+
+        # Global attention for branch4
+        att4 = self.attention4(decode_branch4)
+        decode_branch4 = torch.cat((decode_branch4, att4), dim=0)
+        decode_branch4 = self.conv4_1(decode_branch4)
+        decode_branch4 = self.bn4(decode_branch4)
+        decode_branch4 = self.relu(decode_branch4)
+
+        # Stage 3
+        decode_branch3 = torch.cat((decode_branch4, encode_branch3), dim=0)
+        decode_branch3 = self.conv3(decode_branch3)
+        decode_branch3 = self.relu(decode_branch3)
+        decode_branch3 = self.pool3_att_1(decode_branch3)
+        decode_branch3 = self.relu(decode_branch3)
+        decode_branch3 = self.pool3_att_2(decode_branch3)
+        decode_branch3 = self.bn3(decode_branch3)
+
+        # Local attention for branch3

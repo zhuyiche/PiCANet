@@ -16,21 +16,19 @@ class Renet(nn.Module):
     """
     This Renet is implemented according to paper
     """
-    def __init__(self, patch_size, inplane, outplane):
+    def __init__(self, patch_size, inplane, convchannel):
         super(Renet, self).__init__()
         self.patch_size = patch_size
-        self.inplane = inplane
-        self.outplane = outplane
         self.horizontal_LSTM = nn.LSTM(input_size=inplane,
                                        hidden_size=inplane,
                                        batch_first=True,
                                        bidirectional=True)
-        self.vertical_LSTM = nn.LSTM(input_size=2*inplane,
+        self.vertical_LSTM = nn.LSTM(input_size=inplane,
                                      hidden_size=inplane,
                                      batch_first=True,
                                      bidirectional=True)
-        self.conv = nn.Conv2d(2*inplane, outplane, 1)
-        self.bn = nn.BatchNorm2d(outplane)
+        self.conv = nn.Conv2d(2*inplane, convchannel, 1)
+        self.bn = nn.BatchNorm2d(convchannel)
 
 
     def forward(self, *input):
@@ -84,13 +82,13 @@ class AttentionGlobal(nn.Module):
     """
     Global Attention module.
     """
-    def __init__(self, patch_size, inplane, outplane):
+    def __init__(self, patch_size, inplane, outplane, renet_outplane=100, renetconv_channel=256):
         super(AttentionGlobal, self).__init__()
         # outplane should be height * width
         self.patch_size = patch_size
-        self.renet = Renet(patch_size, inplane, outplane)
+        self.renet = Renet(patch_size, inplane, convchannel=renet_outplane,
+                           convchannel=renetconv_channel)
         self.softmax = F.softmax(input, dim=1)
-        self.in_channel = inplane
 
     def forward(self, *input):
         x = input[0]
@@ -109,25 +107,17 @@ class AttentionLocal(nn.Module):
     """
     Local Attention module.
     """
-    def __init__(self, inplane, implane, outplane, kernels, dilation=None):
+    def __init__(self, width, height, kernels, dilation=None):
         super(AttentionLocal, self).__init__()
         self.sofxmax = F.softmax(input, dim=1)
         assert _isArrayLike(kernels)
-        self.pre_attention = nn.Sequential(
-            nn.Conv2d(inplane, implane, kernels[0],
-                      padding=kernels[0]-1, dilation=dilation[0]),
-            nn.BatchNorm2d(implane),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(implane, outplane, kernels[1],
-                      padding=kernels[1]-1, dilation=dilation[1]),
-            nn.BatchNorm2d(outplane)
-        )
 
     def forward(self, *input):
-        x = input[0]
-        x_att = self.pre_attention(x)
+        x_ori = input[0]
+        x_att = input[1]
+        #x_att = self.pre_attention(x)
         x_att = x_att.view(1,1)
         print(x_att.size())
         x_att = self.softmax(x_att)
-        out = x_att + x
+        out = x_att + x_ori
         return out
