@@ -16,19 +16,26 @@ class Renet(nn.Module):
     """
     This Renet is implemented according to paper
     """
-    def __init__(self, patch_size, inplane, convchannel):
+    def __init__(self, inplane, outchannel = 100, patch_size = 1, LSTM_channel = 256):
+        """
+        patch size = 1 and LSTM channel = 256 is default setting according to the origin code.
+        :param inplane: input channel size.
+        :param outchannel: output channel size
+        :param patch_size: num of patch to be cut.
+        :param LSTM_channel: filters for LSTM.
+        """
         super(Renet, self).__init__()
         self.patch_size = patch_size
         self.horizontal_LSTM = nn.LSTM(input_size=inplane,
-                                       hidden_size=inplane,
+                                       hidden_size=LSTM_channel,
                                        batch_first=True,
                                        bidirectional=True)
         self.vertical_LSTM = nn.LSTM(input_size=inplane,
-                                     hidden_size=inplane,
+                                     hidden_size=LSTM_channel,
                                      batch_first=True,
                                      bidirectional=True)
-        self.conv = nn.Conv2d(2*inplane, convchannel, 1)
-        self.bn = nn.BatchNorm2d(convchannel)
+        self.conv = nn.Conv2d(LSTM_channel, outchannel, 1)
+        self.bn = nn.BatchNorm2d(outchannel)
 
 
     def forward(self, *input):
@@ -82,12 +89,11 @@ class AttentionGlobal(nn.Module):
     """
     Global Attention module.
     """
-    def __init__(self, patch_size, inplane, outplane, renet_outplane=100, renetconv_channel=256):
+    def __init__(self, patch_size, inplane, outplane, renet_outplane=100, renet_LSTM_channel=256):
         super(AttentionGlobal, self).__init__()
         # outplane should be height * width
         self.patch_size = patch_size
-        self.renet = Renet(patch_size, inplane, convchannel=renet_outplane,
-                           convchannel=renetconv_channel)
+        self.renet = Renet(patch_size, inplane) # Set the LSTM channel and output channel.
         self.softmax = F.softmax(input, dim=1)
 
     def forward(self, *input):
@@ -115,7 +121,6 @@ class AttentionLocal(nn.Module):
     def forward(self, *input):
         x_ori = input[0]
         x_att = input[1]
-        #x_att = self.pre_attention(x)
         x_att = x_att.view(1,1)
         print(x_att.size())
         x_att = self.softmax(x_att)
