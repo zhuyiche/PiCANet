@@ -118,16 +118,27 @@ class AttentionLocal(nn.Module):
     """
     Local Attention module.
     """
-    def __init__(self, width, height, kernels, dilation=None):
+    def __init__(self, starting_point, width, height, dilation=None):
+        """
+
+        :param starting_point: left upper corner point
+        :param width: Width of wanted feature map
+        :param height: Height of wanted feature map
+        :param kernels:
+        :param dilation:
+        """
         super(AttentionLocal, self).__init__()
         self.sofxmax = F.softmax(input, dim=1)
-        assert _isArrayLike(kernels)
+        self.starting_point = starting_point
+        self.width = width
+        self.height = height
 
     def forward(self, *input):
         x_ori = input[0]
         x_att = input[1]
-        x_att = x_att.view(1,1)
-        print(x_att.size())
+        x_att = x_att[:, self.starting_point: self.starting_point + self.width,
+                        self.starting_point + self.height, :]
+        #print(x_att.size())
         x_att = self.softmax(x_att)
         out = x_att + x_ori
         return out
