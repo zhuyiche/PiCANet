@@ -24,6 +24,11 @@ class Renet(nn.Module):
         :param patch_size: num of patch to be cut.
         :param LSTM_channel: filters for LSTM.
         """
+
+        #################
+        # Warning! The outchannel should be equal to Width * Height of current feature map,
+        # Please change this number manually.
+        #################
         super(Renet, self).__init__()
         self.patch_size = patch_size
         self.horizontal_LSTM = nn.LSTM(input_size=inplane,
